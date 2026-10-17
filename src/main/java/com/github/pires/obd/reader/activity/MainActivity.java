@@ -14,15 +14,18 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.location.GnssStatus;
 import android.location.GpsStatus;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.location.LocationProvider;
 import android.os.AsyncTask;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 import android.view.Gravity;
@@ -102,6 +105,7 @@ public class MainActivity extends RoboActivity implements ObdProgressListener, L
     public Map<String, String> commandResult = new HashMap<String, String>();
     boolean mGpsIsStarted = false;
     private LocationManager mLocService;
+    private GnssStatus.Callback gnssStatusCallback;
     private LocationProvider mLocProvider;
     private LogCSVWriter myCSVWriter;
     private Location mLastLocation;
@@ -289,7 +293,7 @@ public class MainActivity extends RoboActivity implements ObdProgressListener, L
         if (mLocService != null) {
             mLocProvider = mLocService.getProvider(LocationManager.GPS_PROVIDER);
             if (mLocProvider != null) {
-                mLocService.addGpsStatusListener(this);
+                registerGpsStatus();
                 if (mLocService.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                     gpsStatusTextView.setText(getString(R.string.status_gps_ready));
                     return true;
@@ -301,6 +305,58 @@ public class MainActivity extends RoboActivity implements ObdProgressListener, L
         Log.e(TAG, "Unable to get GPS PROVIDER");
         // todo disable gps controls into Preferences
         return false;
+    }
+
+    /**
+     * GpsStatus APIs were removed for newer Android versions (they throw
+     * UnsupportedOperationException), so use GnssStatus on API 24+ and fall
+     * back to the legacy listener on older devices.
+     */
+    private void registerGpsStatus() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                gnssStatusCallback = new GnssStatus.Callback() {
+                    @Override
+                    public void onStarted() {
+                        onGpsStatusChanged(GpsStatus.GPS_EVENT_STARTED);
+                    }
+
+                    @Override
+                    public void onStopped() {
+                        onGpsStatusChanged(GpsStatus.GPS_EVENT_STOPPED);
+                    }
+
+                    @Override
+                    public void onFirstFix(int ttffMillis) {
+                        onGpsStatusChanged(GpsStatus.GPS_EVENT_FIRST_FIX);
+                    }
+
+                    @Override
+                    public void onSatelliteStatusChanged(GnssStatus status) {
+                        onGpsStatusChanged(GpsStatus.GPS_EVENT_SATELLITE_STATUS);
+                    }
+                };
+                mLocService.registerGnssStatusCallback(gnssStatusCallback);
+            } else {
+                mLocService.addGpsStatusListener(this);
+            }
+        } catch (SecurityException | UnsupportedOperationException e) {
+            // Location permission not granted or GNSS status unsupported; GPS status text just won't update
+            Log.w(TAG, "Unable to register GPS status listener", e);
+        }
+    }
+
+    private void unregisterGpsStatus() {
+        try {
+            if (gnssStatusCallback != null) {
+                mLocService.unregisterGnssStatusCallback(gnssStatusCallback);
+                gnssStatusCallback = null;
+            } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+                mLocService.removeGpsStatusListener(this);
+            }
+        } catch (SecurityException | UnsupportedOperationException e) {
+            Log.w(TAG, "Unable to unregister GPS status listener", e);
+        }
     }
 
     private void updateTripStatistic(final ObdCommandJob job, final String cmdID) {
@@ -351,7 +407,7 @@ public class MainActivity extends RoboActivity implements ObdProgressListener, L
         super.onDestroy();
 
         if (mLocService != null) {
-            mLocService.removeGpsStatusListener(this);
+            unregisterGpsStatus();
             mLocService.removeUpdates(this);
         }
 
